@@ -1,0 +1,138 @@
+name: install-test
+
+# Installs a real OpenCart (the official release zip from github.com/opencart/opencart) with its command line
+# installer, installs the GenMagic extension the way the Extension Installer does, and runs the checks. GenMagic is
+# mocked everywhere: nothing leaves the runner. When a step fails, the lines that explain it are printed as
+# "::error::" annotations (at most 10) so they can be read through the API.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install-test:
+    name: OpenCart ${{ matrix.series }}.x
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # 4.1.0.x is the supported series this test must pass on. 4.0.2.x runs alongside as a compatibility report.
+    continue-on-error: ${{ matrix.series == '4.0.2' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ['4.1.0', '4.0.2']
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: opencart
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: root
+      DB_NAME: opencart
+      GITHUB_TOKEN: ${{ github.token }}
+      OC_DIR: ${{ github.workspace }}/../opencart-site
+      CI_DIR: ${{ github.workspace }}/.github/ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, gd, curl, zip, mbstring, openssl, zlib
+          ini-values: file_uploads=On, memory_limit=512M
+          tools: none
+
+      - name: Lint every PHP file of the extension
+        run: |
+          set -e
+          status=0
+          for f in $(find extension -name '*.php'); do
+            php -l "$f" > /tmp/lint.out 2>&1 || { cat /tmp/lint.out; status=1; }
+          done
+          [ "$status" -eq 0 ] && echo "all PHP files are free of syntax errors"
+          exit "$status"
+
+      - name: Build the .ocmod.zip package
+        run: bash "$CI_DIR/run-step.sh" build bash scripts/build-zip.sh
+
+      - name: Check the package layout
+        run: |
+          set -e
+          zip="dist/genmagic.ocmod.zip"
+          unzip -p "$zip" install.json | jq -e '.name == "GenMagic AI Product Photos" and .version == "1.0.0" and .author == "GenMagic" and .link == "https://genmagic.co"'
+          unzip -Z1 "$zip" | grep -qx 'install.json'
+          unzip -Z1 "$zip" | grep -q '^admin/controller/module/genmagic_photos.php$'
+          unzip -Z1 "$zip" | grep -qE '^(\.\./|/)' && { echo "ERROR: unsafe path in the package"; exit 1; } || true
+          echo "package layout is right"
+
+      - name: Install OpenCart ${{ matrix.series }}.x with its CLI installer
+        run: bash "$CI_DIR/run-step.sh" opencart-install bash "$CI_DIR/install-opencart.sh" "${{ matrix.series }}" "$OC_DIR" "http://127.0.0.1:8080/"
+
+      - name: Install the extension (what the Extension Installer does)
+        run: |
+          # The installer takes the extension code from the file name (genmagic.ocmod.zip) and copies every entry of
+          # the zip into extension/<code>/ of the shop.
+          set -e
+          mkdir -p "$OC_DIR/extension/genmagic"
+          unzip -q dist/genmagic.ocmod.zip -d "$OC_DIR/extension/genmagic"
+          chmod -R a+rX "$OC_DIR/extension/genmagic"
+          find "$OC_DIR/extension/genmagic" -type f | sort
+
+      - name: Offline checks (mocked GenMagic, OpenCart's own Twig, the real curl code against a local server)
+        run: |
+          set -e
+          (cd "$RUNNER_TEMP" && nohup php -S 127.0.0.1:8099 "$CI_DIR/echo-server.php" > "$RUNNER_TEMP/echo-server.log" 2>&1 &)
+          for i in $(seq 1 20); do
+            curl -fsS -o /dev/null "http://127.0.0.1:8099/json" && break
+            sleep 1
+          done
+          bash "$CI_DIR/run-step.sh" unit php "$CI_DIR/unit.php" "$OC_DIR/" "$GITHUB_WORKSPACE/extension/genmagic/" "http://127.0.0.1:8099"
+
+      - name: Smoke test (install into the database, settings, make a photo, add it)
+        run: bash "$CI_DIR/run-step.sh" smoke php "$CI_DIR/smoke.php" "$OC_DIR/"
+
+      - name: Web check (admin sign in, settings page, panel on the product form)
+        run: |
+          set -e
+          (cd "$OC_DIR" && nohup php -S 127.0.0.1:8080 -t "$OC_DIR" > "$RUNNER_TEMP/php-server.log" 2>&1 &)
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null "http://127.0.0.1:8080/" && break
+            sleep 1
+          done
+          bash "$CI_DIR/run-step.sh" web bash "$CI_DIR/web-check.sh" "http://127.0.0.1:8080/" 28
+
+      - name: OpenCart logs on failure
+        if: failure()
+        run: |
+          for f in "$OC_DIR/system/storage/logs/error.log" "$OC_DIR/system/storage/logs/smoke.log" "$RUNNER_TEMP/php-server.log"; do
+            [ -s "$f" ] || continue
+            echo "== $f"
+            tail -n 40 "$f"
+            bash "$CI_DIR/annotate.sh" "$f" "$(basename "$f")"
+          done
+
+      - name: Upload the package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: genmagic.ocmod.zip (OpenCart ${{ matrix.series }}.x run)
+          path: dist/genmagic.ocmod.zip
+          if-no-files-found: ignore

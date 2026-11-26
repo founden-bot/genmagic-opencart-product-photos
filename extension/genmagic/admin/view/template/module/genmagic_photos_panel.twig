@@ -1,0 +1,251 @@
+<fieldset id="genmagic-photos" class="border rounded p-3 mt-4" data-ready="{% if ready %}1{% else %}0{% endif %}" data-product-id="{{ product_id }}" data-models-url="{{ models_url|e }}" data-generate-url="{{ generate_url|e }}" data-add-url="{{ add_url|e }}" data-pricing-url="https://genmagic.co/pricing" data-text-working="{{ text_working|e }}" data-text-wait="{{ text_wait|e }}" data-text-make="{{ text_make|e }}" data-text-cost="{{ text_cost|e }}" data-text-balance="{{ text_balance|e }}" data-text-about="{{ text_about|e }}" data-text-added="{{ text_added|e }}" data-text-reload="{{ text_reload_note|e }}" data-text-pricing="{{ text_pricing|e }}" data-text-preview-alt="{{ text_preview_alt|e }}" data-text-error="{{ text_error|e }}">
+  <legend class="fs-5"><i class="fa-solid fa-wand-magic-sparkles"></i> {{ text_title|e }}</legend>
+  {% if problem %}
+    <div class="alert alert-warning mb-0">{{ problem|e }}{% if product_id > 0 %} <a href="{{ settings_url|e }}" target="_blank" rel="noopener">{{ text_settings|e }}</a>{% endif %}</div>
+  {% else %}
+    <p class="text-muted">{{ text_intro|e }}</p>
+    <div class="row mb-3">
+      <label for="genmagic-style" class="col-sm-2 col-form-label">{{ text_style|e }}</label>
+      <div class="col-sm-10">
+        <select id="genmagic-style" class="form-select">
+          {% for style in styles %}
+            <option value="{{ style.id|e }}"{% if style.id == default_style %} selected{% endif %}>{{ style.label|e }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="row mb-3">
+      <label for="genmagic-extra" class="col-sm-2 col-form-label">{{ text_extra|e }}</label>
+      <div class="col-sm-10">
+        <input type="text" id="genmagic-extra" maxlength="{{ max_extra }}" class="form-control" autocomplete="off"/>
+        <div class="form-text">{{ text_extra_help|e }}</div>
+      </div>
+    </div>
+    <div class="row mb-3">
+      <label for="genmagic-model" class="col-sm-2 col-form-label">{{ text_model|e }}</label>
+      <div class="col-sm-10">
+        <select id="genmagic-model" class="form-select"></select>
+      </div>
+    </div>
+    <div class="row mb-3">
+      <div class="col-sm-10 offset-sm-2">
+        <button type="button" id="genmagic-make" class="btn btn-primary">{{ text_make|e }}</button>
+      </div>
+    </div>
+    <div id="genmagic-message" class="alert d-none" role="status"></div>
+    <div id="genmagic-result" class="d-none">
+      <img id="genmagic-preview" src="" alt="" class="img-thumbnail mb-3" style="max-width: 320px;"/>
+      <p id="genmagic-cost" class="mb-2"></p>
+      <div class="form-check mb-3">
+        <input type="checkbox" id="genmagic-main" class="form-check-input"/>
+        <label for="genmagic-main" class="form-check-label">{{ text_use_main|e }}</label>
+      </div>
+      <button type="button" id="genmagic-add" class="btn btn-success">{{ text_add|e }}</button>
+      <button type="button" id="genmagic-discard" class="btn btn-light">{{ text_discard|e }}</button>
+    </div>
+    <script type="text/javascript">
+    (function () {
+      var root = document.getElementById('genmagic-photos');
+
+      if (!root || root.getAttribute('data-ready') !== '1') {
+        return;
+      }
+
+      var d = function (name) { return root.getAttribute('data-' + name) || ''; };
+      var el = function (id) { return document.getElementById(id); };
+      var token = '';
+      var previewUrl = '';
+      var busy = false;
+
+      function show(text, kind, link) {
+        var box = el('genmagic-message');
+        box.className = 'alert alert-' + kind;
+        box.textContent = text;
+
+        if (link) {
+          var a = document.createElement('a');
+          a.href = link;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = d('text-pricing');
+          box.appendChild(document.createTextNode(' '));
+          box.appendChild(a);
+        }
+      }
+
+      function hide() {
+        el('genmagic-message').className = 'alert d-none';
+      }
+
+      function post(url, fields) {
+        var body = new FormData();
+
+        Object.keys(fields).forEach(function (key) { body.append(key, fields[key]); });
+
+        return fetch(url, { method: 'POST', body: body, credentials: 'same-origin' }).then(function (response) {
+          return response.json();
+        });
+      }
+
+      function setBusy(state) {
+        busy = state;
+        el('genmagic-make').disabled = state;
+        el('genmagic-make').textContent = state ? d('text-working') : d('text-make');
+      }
+
+      function money(value) {
+        return value === null || value === undefined ? '' : '$' + value;
+      }
+
+      function loadModels() {
+        fetch(d('models-url'), { credentials: 'same-origin' }).then(function (response) {
+          return response.json();
+        }).then(function (reply) {
+          if (!reply.success) {
+            show(reply.error || '', 'warning');
+            return;
+          }
+
+          var select = el('genmagic-model');
+
+          reply.models.forEach(function (model) {
+            var option = document.createElement('option');
+            option.value = model.id;
+            option.textContent = model.name + (model.est_usd === null || model.est_usd === undefined ? '' : ' (' + d('text-about') + ' $' + Number(model.est_usd).toFixed(2) + ')');
+            option.selected = model.id === reply['default'];
+            select.appendChild(option);
+          });
+        }).catch(function () {});
+      }
+
+      function addRowToForm(path, url, asMain) {
+        var done = false;
+        var button = document.getElementById('button-image');
+
+        // The product form saves its own list of additional images, so the new photo is put in that list too.
+        if (button && button.closest('table')) {
+          button.click();
+
+          var rows = button.closest('table').querySelectorAll('tbody tr');
+          var row = rows.length ? rows[rows.length - 1] : null;
+          var hidden = row ? row.querySelector('input[type="hidden"][name$="[image]"]') : null;
+          var img = row ? row.querySelector('img') : null;
+
+          if (hidden) {
+            hidden.value = path;
+            done = true;
+
+            if (img) {
+              img.src = url;
+            }
+          }
+        }
+
+        if (asMain) {
+          var input = document.getElementById('input-image');
+          var thumb = document.getElementById('thumb-image');
+
+          if (input) {
+            input.value = path;
+          }
+
+          if (thumb) {
+            thumb.src = url;
+          }
+        }
+
+        return done;
+      }
+
+      el('genmagic-make').addEventListener('click', function () {
+        if (busy) {
+          return;
+        }
+
+        setBusy(true);
+        el('genmagic-result').className = 'd-none';
+        show(d('text-wait'), 'info');
+
+        post(d('generate-url'), {
+          product_id: d('product-id'),
+          style: el('genmagic-style').value,
+          extra: el('genmagic-extra').value,
+          model: el('genmagic-model').value
+        }).then(function (reply) {
+          setBusy(false);
+
+          if (!reply.success) {
+            show(reply.error || '', 'danger', reply.pricing_url);
+            return;
+          }
+
+          hide();
+          token = reply.token;
+          previewUrl = reply.preview_url;
+          el('genmagic-preview').src = previewUrl;
+          el('genmagic-preview').alt = d('text-preview-alt');
+          el('genmagic-main').checked = false;
+
+          var parts = [];
+
+          if (reply.cost_usd !== null) {
+            parts.push(d('text-cost') + ': ' + money(reply.cost_usd));
+          }
+
+          if (reply.balance_usd !== null) {
+            parts.push(d('text-balance') + ': ' + money(reply.balance_usd));
+          }
+
+          el('genmagic-cost').textContent = parts.join('. ');
+          el('genmagic-result').className = '';
+        }).catch(function () {
+          setBusy(false);
+          show(d('text-error'), 'danger');
+        });
+      });
+
+      el('genmagic-discard').addEventListener('click', function () {
+        token = '';
+        el('genmagic-result').className = 'd-none';
+        hide();
+      });
+
+      el('genmagic-add').addEventListener('click', function () {
+        if (!token || busy) {
+          return;
+        }
+
+        var asMain = el('genmagic-main').checked;
+
+        el('genmagic-add').disabled = true;
+
+        post(d('add-url'), {
+          product_id: d('product-id'),
+          token: token,
+          use_as_main: asMain ? '1' : ''
+        }).then(function (reply) {
+          el('genmagic-add').disabled = false;
+
+          if (!reply.success) {
+            show(reply.error || '', 'danger');
+            return;
+          }
+
+          token = '';
+          el('genmagic-result').className = 'd-none';
+          show(d('text-added'), 'success');
+
+          if (!addRowToForm(reply.image, reply.url, reply.main)) {
+            show(d('text-added') + ' ' + d('text-reload'), 'warning');
+          }
+        }).catch(function () {
+          el('genmagic-add').disabled = false;
+          show(d('text-error'), 'danger');
+        });
+      });
+
+      loadModels();
+    })();
+    </script>
+  {% endif %}
+</fieldset>
